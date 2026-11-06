@@ -79,10 +79,10 @@ pub fn validate_evidence_item(
         bail!("Il campo uri_or_cmd di una prova non può essere vuoto");
     }
 
-    // Prefissi tecnici ammessi per uri_or_cmd (comandi shell riproducibili, URL, URI o file path)
+    // Prefissi tecnici ammessi per uri_or_cmd (comandi shell riproducibili, navigazione directory, URL, URI o file path)
     let valid_prefixes = [
-        "cargo ", "python3 ", "python ", "bash ", "sh ", "curl ", "git ", "pytest ", "node ",
-        "deno ", "bun ", "http://", "https://", "urn:", "file://", "./", "/",
+        "cd ", "cargo ", "python3 ", "python ", "bash ", "sh ", "curl ", "git ", "pytest ",
+        "node ", "deno ", "bun ", "http://", "https://", "urn:", "file://", "./", "/",
     ];
 
     let has_valid_prefix = valid_prefixes

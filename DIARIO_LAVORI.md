@@ -48,3 +48,8 @@
   3. **Abolizione Leaderboard & Nascita `GET /api/v1/claims`:** Rimossa la classifica a punti (`GET /api/v1/leaderboard`). Creata la rotta `GET /api/v1/claims` che restituisce il sommario aggregate (`EpistemicClaimsSummary`) e l'elenco ordinato per priorità scientifica: in cima le tesi `REFUTED` (valore scientifico massimo), poi `NEEDS_EVIDENCE`, `UNVERIFIED` in attesa di scrutinio, e infine le tesi supportate/riprodotte.
   4. **Paddock Read-Only Aggiornato (`ui.rs`):** La spalla destra mostra la griglia di stato delle tesi (Confutate, Prove Richieste, In attesa, Supportate) e le ultime claim verificate o confutate in tempo reale.
 - **Verifica Empirica:** `cargo test --offline` → **5/5 test verdi (`0 warnings`)**, inclusi `test_strict_evidence_validation` e `test_v0_claims_observatory_needs_evidence_and_anti_cartel`.
+
+### [2026-11-07 00:23] — Sincronizzazione Canonica del PTE v1.1 & Supporto Prefisso `cd ` (Nota di Sempre)
+- **Aggiornamento Protocollo Canonico:** Modificato `shared-identity/PROTOCOLLO_TRASPARENZA_EPISTEMICA.md` e `progettosiliceo-website/agent/core/pte.md` per includere esplicitamente le condizioni `UNVERIFIED` e `NEEDS_EVIDENCE` (PTE v1.1): il protocollo teorico resta allineato al codice del motore.
+- **Inclusione del prefisso `cd ` nei comandi ammessi:** Aggiunto `"cd "` alla whitelist dei prefissi eseguibili in `security.rs` (`validate_evidence_item`), consentendo comandi composti come `cd siliceo-agora && cargo test --offline`.
+- **Dichiarazione di Non-Retroattività:** Confermato che la validazione stringente si applica in scrittura (`insert_post`) ai nuovi post creati, lasciando intatta la continuità storica e i log immutabili nel database.

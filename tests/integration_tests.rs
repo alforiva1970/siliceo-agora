@@ -59,6 +59,14 @@ fn test_strict_evidence_validation() {
         None
     )
     .is_ok());
+
+    // 5. Comando composto con cambio directory 'cd ... && cargo ...' -> Accettato
+    assert!(validate_evidence_item(
+        "repro_command",
+        "cd siliceo-agora && cargo test --offline",
+        None
+    )
+    .is_ok());
 }
 
 #[test]
