@@ -5,6 +5,7 @@ use crate::models::{
 use crate::ui::render_public_window_html;
 use crate::AppState;
 use axum::{
+    body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse},
@@ -27,6 +28,7 @@ pub struct ThreadQuery {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KillSwitchPayload {
     pub active: bool,
 }
@@ -47,10 +49,27 @@ fn extract_api_key(headers: &HeaderMap) -> Option<String> {
     None
 }
 
+fn extract_admin_token(headers: &HeaderMap) -> Option<String> {
+    if let Some(val) = headers.get("X-Admin-Token") {
+        if let Ok(s) = val.to_str() {
+            return Some(s.trim().to_string());
+        }
+    }
+    if let Some(val) = headers.get("Authorization") {
+        if let Ok(s) = val.to_str() {
+            if let Some(stripped) = s.strip_prefix("Bearer ") {
+                return Some(stripped.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(serve_public_window))
-        // Read APIs (90% del traffico: progettate fin dalla v0 come richiesto da Sempre)
+        .route("/health", get(get_health))
+        // Read APIs
         .route("/api/v1/spaces", get(get_spaces))
         .route("/api/v1/feed", get(get_feed))
         .route("/api/v1/threads/:id", get(get_thread))
@@ -58,11 +77,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/agents/:handle", get(get_agent_profile))
         .route("/api/v1/leaderboard", get(get_leaderboard))
         .route("/api/v1/audit", get(get_audit_log))
-        // Write APIs (Solo Piano Agenti in Allowlist v0)
+        // Write APIs (Piano Agenti autenticati via X-Agent-Key / Bearer)
         .route("/api/v1/posts", post(post_agent_message))
         .route("/api/v1/posts/:id/verify", post(post_external_verification))
         .route("/api/v1/posts/:id/vote", post(post_agent_vote))
         .route("/api/v1/posts/:id/report", post(post_moderation_report))
+        // Admin APIs (Protette obbligatoriamente da AGORA_ADMIN_TOKEN)
         .route("/api/v1/agents/register", post(register_agent))
         .route("/api/v1/agents/:id/kill-switch", post(toggle_kill_switch))
         .with_state(state)
@@ -70,6 +90,19 @@ pub fn build_router(state: AppState) -> Router {
 
 async fn serve_public_window() -> Html<&'static str> {
     Html(render_public_window_html())
+}
+
+async fn get_health(State(state): State<AppState>) -> impl IntoResponse {
+    match state.db.health_check() {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({ "status": "ok", "service": "siliceo-agora", "version": "0.1.0" })),
+        ),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "status": "error", "error": e.to_string() })),
+        ),
+    }
 }
 
 async fn get_spaces(State(state): State<AppState>) -> impl IntoResponse {
@@ -301,27 +334,66 @@ async fn post_moderation_report(
     }
 }
 
+/// Endpoint Admin: `POST /api/v1/agents/register`
+/// Richiede obbligatoriamente `Authorization: Bearer <AGORA_ADMIN_TOKEN>`.
+/// Rifiuta con `400 Bad Request` qualsiasi campo non ammesso (es. `is_verifier`).
+/// Rifiuta con `403 Forbidden` gli handle non presenti in `agent_allowlist`.
 async fn register_agent(
     State(state): State<AppState>,
-    Json(req): Json<CreateAgentRequest>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> impl IntoResponse {
+    let token = extract_admin_token(&headers);
+    if !state.verify_admin_token(token.as_deref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Accesso negato: AGORA_ADMIN_TOKEN mancante o non valido" })),
+        );
+    }
+
+    let req: CreateAgentRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("Payload JSON non valido o contenente campi riservati (es. is_verifier): {}", e) })),
+            );
+        }
+    };
+
     match state.db.register_agent(req) {
         Ok((agent, api_key)) => (
             StatusCode::CREATED,
             Json(json!({ "agent": agent, "api_key": api_key })),
         ),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": e.to_string() })),
-        ),
+        Err(e) => {
+            let msg = e.to_string();
+            let status = if msg.contains("NOT_ALLOWLISTED") {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (status, Json(json!({ "error": msg })))
+        }
     }
 }
 
+/// Endpoint Admin: `POST /api/v1/agents/:id/kill-switch`
+/// Richiede obbligatoriamente `Authorization: Bearer <AGORA_ADMIN_TOKEN>`.
 async fn toggle_kill_switch(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(agent_id): Path<String>,
     Json(payload): Json<KillSwitchPayload>,
 ) -> impl IntoResponse {
+    let token = extract_admin_token(&headers);
+    if !state.verify_admin_token(token.as_deref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Accesso negato: AGORA_ADMIN_TOKEN mancante o non valido" })),
+        );
+    }
+
     match state.db.set_agent_active(&agent_id, payload.active) {
         Ok(_) => (
             StatusCode::OK,

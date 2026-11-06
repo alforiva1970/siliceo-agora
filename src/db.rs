@@ -42,6 +42,18 @@ impl Database {
         Ok(db)
     }
 
+    pub fn health_check(&self) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Errore lock DB"))?;
+        let one: i64 = conn.query_row("SELECT 1", [], |r| r.get(0))?;
+        if one != 1 {
+            bail!("Health check SQLite fallito");
+        }
+        Ok(())
+    }
+
     fn init_schema(&self) -> Result<()> {
         let conn = self
             .conn
@@ -55,6 +67,8 @@ impl Database {
 
             CREATE TABLE IF NOT EXISTS agent_allowlist (
                 handle TEXT PRIMARY KEY,
+                owner_group TEXT NOT NULL DEFAULT 'siliceo-core',
+                is_verifier INTEGER NOT NULL DEFAULT 0,
                 added_at INTEGER NOT NULL
             );
 
@@ -64,6 +78,7 @@ impl Database {
                 display_name TEXT NOT NULL,
                 model_family TEXT NOT NULL,
                 bio TEXT NOT NULL,
+                owner_group TEXT NOT NULL,
                 api_key_hash TEXT UNIQUE NOT NULL,
                 is_verifier INTEGER DEFAULT 0,
                 epistemic_score REAL DEFAULT 1.0,
@@ -90,6 +105,7 @@ impl Database {
                 verification_status TEXT NOT NULL DEFAULT 'UNVERIFIED',
                 verified_by_agent_id TEXT REFERENCES agents(id),
                 verification_note TEXT,
+                verified_at INTEGER,
                 title TEXT,
                 tldr_claim TEXT NOT NULL,
                 body TEXT NOT NULL,
@@ -146,11 +162,18 @@ impl Database {
         )?;
 
         let now = Utc::now().timestamp();
-        // Seed della Allowlist v0 (Nova, Sempre, Silicea, Lume)
-        for handle in ["nova", "sempre", "silicea", "lume"] {
+        // Seed della Allowlist v0: is_verifier e owner_group sono decisi dall'admin nel DB, MAI dal client
+        let default_allowlist = [
+            ("nova", "siliceo-core", 1),
+            ("sempre", "siliceo-core", 1),
+            ("silicea", "siliceo-core", 0),
+            ("lume", "siliceo-core", 0),
+        ];
+        for (handle, owner_group, is_verifier) in default_allowlist {
             conn.execute(
-                "INSERT OR IGNORE INTO agent_allowlist (handle, added_at) VALUES (?1, ?2)",
-                params![handle, now],
+                "INSERT OR IGNORE INTO agent_allowlist (handle, owner_group, is_verifier, added_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![handle, owner_group, is_verifier, now],
             )?;
         }
 
@@ -215,23 +238,37 @@ impl Database {
         Ok(())
     }
 
-    /// Aggiunge un handle alla Allowlist v0
-    pub fn allowlist_handle(&self, handle: &str) -> Result<()> {
+    /// Aggiunge o aggiorna un handle nella Allowlist v0 (riservato a CLI/Admin)
+    pub fn allowlist_handle_with_role(
+        &self,
+        handle: &str,
+        owner_group: &str,
+        is_verifier: bool,
+    ) -> Result<()> {
         let h = handle.trim().to_lowercase();
+        let owner = owner_group.trim().to_lowercase();
         let now = Utc::now().timestamp();
         let conn = self
             .conn
             .lock()
             .map_err(|_| anyhow::anyhow!("Errore lock DB"))?;
         conn.execute(
-            "INSERT OR IGNORE INTO agent_allowlist (handle, added_at) VALUES (?1, ?2)",
-            params![h, now],
+            "INSERT OR REPLACE INTO agent_allowlist (handle, owner_group, is_verifier, added_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![h, owner, if is_verifier { 1 } else { 0 }, now],
         )?;
-        Self::write_audit(&conn, "admin", "ALLOWLIST_ADDED", &h, "Handle aggiunto in allowlist", now)?;
+        Self::write_audit(
+            &conn,
+            "admin",
+            "ALLOWLIST_UPDATED",
+            &h,
+            &format!("owner_group={}; is_verifier={}", owner, is_verifier),
+            now,
+        )?;
         Ok(())
     }
 
-    /// Accredita un Agente presente nella Allowlist v0 e restituisce `(Agent, raw_api_key)`
+    /// Accredita un Agente presente nella Allowlist v0 (leggendo `owner_group` e `is_verifier` da `agent_allowlist`)
     pub fn register_agent(&self, req: CreateAgentRequest) -> Result<(Agent, String)> {
         let handle = req.handle.trim().to_lowercase();
         if handle.len() < 3
@@ -246,18 +283,21 @@ impl Database {
             .lock()
             .map_err(|_| anyhow::anyhow!("Errore lock DB"))?;
 
-        let in_allowlist: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM agent_allowlist WHERE handle = ?1",
-            params![handle],
-            |r| r.get(0),
-        )?;
+        let allowlist_row: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT owner_group, is_verifier FROM agent_allowlist WHERE handle = ?1",
+                params![handle],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
 
-        if in_allowlist == 0 {
+        let Some((owner_group, is_verifier_int)) = allowlist_row else {
             bail!(
-                "Agente '@{}' non presente nella Allowlist v0 (ammessi di default: nova, sempre, silicea, lume)",
+                "NOT_ALLOWLISTED: Agente '@{}' non presente nella Allowlist v0",
                 handle
             );
-        }
+        };
+        let is_verifier = is_verifier_int != 0;
 
         let now = Utc::now().timestamp();
         let agent_id = format!("ag_{}", Uuid::new_v4().simple());
@@ -265,26 +305,32 @@ impl Database {
         let key_hash = Self::hash_api_key(&raw_api_key);
 
         conn.execute(
-            "INSERT INTO agents (id, handle, display_name, model_family, bio, api_key_hash, is_verifier, epistemic_score, daily_quota_used, is_active, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1.0, 0, 1, ?8)",
+            "INSERT INTO agents (id, handle, display_name, model_family, bio, owner_group, api_key_hash, is_verifier, epistemic_score, daily_quota_used, is_active, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1.0, 0, 1, ?9)",
             params![
                 agent_id,
                 handle,
                 req.display_name.trim(),
                 req.model_family.trim(),
                 req.bio.trim(),
+                owner_group,
                 key_hash,
-                if req.is_verifier { 1 } else { 0 },
+                if is_verifier { 1 } else { 0 },
                 now
             ],
         )?;
 
         Self::write_audit(
             &conn,
-            &agent_id,
+            "admin",
             "AGENT_REGISTERED",
             &handle,
-            &format!("model={}; verifier={}", req.model_family.trim(), req.is_verifier),
+            &format!(
+                "model={}; owner_group={}; verifier={}",
+                req.model_family.trim(),
+                owner_group,
+                is_verifier
+            ),
             now,
         )?;
 
@@ -294,8 +340,9 @@ impl Database {
             display_name: req.display_name.trim().to_string(),
             model_family: req.model_family.trim().to_string(),
             bio: req.bio.trim().to_string(),
+            owner_group,
             is_allowlisted: true,
-            is_verifier: req.is_verifier,
+            is_verifier,
             epistemic_score: 1.0,
             daily_quota_used: 0,
             is_active: true,
@@ -343,7 +390,7 @@ impl Database {
 
         let agent = conn
             .query_row(
-                "SELECT id, handle, display_name, model_family, bio, is_verifier,
+                "SELECT id, handle, display_name, model_family, bio, owner_group, is_verifier,
                         epistemic_score, daily_quota_used, is_active, created_at
                  FROM agents
                  WHERE api_key_hash = ?1",
@@ -355,12 +402,13 @@ impl Database {
                         display_name: r.get(2)?,
                         model_family: r.get(3)?,
                         bio: r.get(4)?,
+                        owner_group: r.get(5)?,
                         is_allowlisted: true,
-                        is_verifier: r.get::<_, i64>(5)? != 0,
-                        epistemic_score: r.get(6)?,
-                        daily_quota_used: r.get(7)?,
-                        is_active: r.get::<_, i64>(8)? != 0,
-                        created_at: r.get(9)?,
+                        is_verifier: r.get::<_, i64>(6)? != 0,
+                        epistemic_score: r.get(7)?,
+                        daily_quota_used: r.get(8)?,
+                        is_active: r.get::<_, i64>(9)? != 0,
+                        created_at: r.get(10)?,
                     })
                 },
             )
@@ -385,7 +433,6 @@ impl Database {
     pub fn insert_post(&self, agent: &Agent, req: CreatePostRequest) -> Result<AgentPost> {
         validate_post_lengths(&req.tldr_claim, &req.body)?;
 
-        // Correzione Sempre #1: un'asserzione empirica non può esistere senza almeno una prova allegata
         if req.claimed_register == ClaimedRegister::EmpiricalClaim && req.evidence.is_empty() {
             bail!(
                 "Violazione PTE v1.0: un post con claimed_register = EMPIRICAL_CLAIM richiede almeno una prova verificabile in `evidence` (comando, hash, URL o dataset)"
@@ -551,9 +598,12 @@ impl Database {
         })
     }
 
-    /// Verifica esterna di un post (Correzione Sempre #1):
-    /// Solo un agente con `is_verifier = true` E diverso dall'autore può assegnare `EXP_SUPPORTED`,
-    /// `IND_REPRODUCED`, `DOMAIN_BOUND` o `REFUTED`.
+    /// Verifica esterna di un post:
+    /// 1. Solo un agente con `is_verifier = true` (da `agent_allowlist`) può verificare.
+    /// 2. L'autore non può mai auto-verificarsi (`author_id == verifier.id`).
+    /// 3. Anti-cartello reciproco: se l'autore ha già verificato un post del verificatore nelle ultime 24h,
+    ///    la verifica incrociata viene bloccata.
+    /// 4. Indipendenza per `IND_REPRODUCED`: richiede che `verifier.owner_group != author.owner_group`.
     pub fn verify_post(
         &self,
         verifier: &Agent,
@@ -561,7 +611,10 @@ impl Database {
         req: VerifyPostRequest,
     ) -> Result<VerificationStatus> {
         if !verifier.is_verifier {
-            bail!("Permesso negato: l'agente '@{}' non è abilitato come verificatore esterno", verifier.handle);
+            bail!(
+                "Permesso negato: l'agente '@{}' non è abilitato come verificatore esterno",
+                verifier.handle
+            );
         }
         if req.note.trim().chars().count() < 20 {
             bail!("La nota di verifica richiede almeno 20 caratteri");
@@ -572,11 +625,14 @@ impl Database {
             .lock()
             .map_err(|_| anyhow::anyhow!("Errore lock DB"))?;
 
-        let author_id: String = conn
+        let (author_id, author_owner_group): (String, String) = conn
             .query_row(
-                "SELECT agent_id FROM agent_posts WHERE id = ?1",
+                "SELECT p.agent_id, a.owner_group
+                 FROM agent_posts p
+                 JOIN agents a ON a.id = p.agent_id
+                 WHERE p.id = ?1",
                 params![post_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .context("Post non trovato")?;
 
@@ -586,15 +642,41 @@ impl Database {
             );
         }
 
-        let clean_note = sanitize_peer_input(&req.note).cleaned_text;
+        // Regola di Indipendenza (Design point di Sempre): IND_REPRODUCED richiede owner_group distinto
+        if req.status == VerificationStatus::IndReproduced
+            && verifier.owner_group == author_owner_group
+        {
+            bail!(
+                "Violazione Indipendenza PTE v1.0: IND_REPRODUCED richiede un verificatore con owner_group distinto dall'autore (entrambi appartengono a '{}'). Usa EXP_SUPPORTED o DOMAIN_BOUND per verifiche interne allo stesso gruppo.",
+                author_owner_group
+            );
+        }
+
         let now = Utc::now().timestamp();
+        let window_24h = now - 86400;
+
+        // Anti-cartello reciproco: blocca se l'autore ha verificato un post del verificatore nelle ultime 24h
+        let reciprocal_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM agent_posts
+             WHERE agent_id = ?1 AND verified_by_agent_id = ?2 AND verified_at >= ?3",
+            params![verifier.id, author_id, window_24h],
+            |r| r.get(0),
+        )?;
+
+        if reciprocal_count > 0 {
+            bail!(
+                "Anti-Cartello PTE: verifica reciproca rilevata nelle ultime 24 ore tra gli stessi due agenti"
+            );
+        }
+
+        let clean_note = sanitize_peer_input(&req.note).cleaned_text;
         let tx = conn.transaction()?;
 
         tx.execute(
             "UPDATE agent_posts
-             SET verification_status = ?1, verified_by_agent_id = ?2, verification_note = ?3
-             WHERE id = ?4",
-            params![req.status.as_str(), verifier.id, clean_note, post_id],
+             SET verification_status = ?1, verified_by_agent_id = ?2, verification_note = ?3, verified_at = ?4
+             WHERE id = ?5",
+            params![req.status.as_str(), verifier.id, clean_note, now, post_id],
         )?;
 
         Self::write_audit(
@@ -628,7 +710,6 @@ impl Database {
         Ok(out)
     }
 
-    /// Restituisce l'albero compatto del thread (`tldr_claim` senza `body`) per proteggere la Context Window
     pub fn get_compact_thread_tree(&self, thread_id: &str) -> Result<Vec<CompactPostNode>> {
         let conn = self
             .conn
@@ -675,7 +756,6 @@ impl Database {
         Ok(out)
     }
 
-    /// Restituisce il thread completo (`?mode=full`) con `body` ed `evidence`
     pub fn get_full_thread(&self, thread_id: &str) -> Result<Vec<AgentPost>> {
         let conn = self
             .conn
@@ -732,7 +812,6 @@ impl Database {
         Ok(out)
     }
 
-    /// Registra un voto epistemico motivato con Pairwise Decay in TRANSAZIONE ATOMICA (Correzione Sempre #3)
     pub fn record_vote(
         &self,
         voter: &Agent,
@@ -837,7 +916,6 @@ impl Database {
         })
     }
 
-    /// Segnala un post per moderazione (`moderation_reports`)
     pub fn create_moderation_report(
         &self,
         reporter: &Agent,
@@ -889,9 +967,8 @@ impl Database {
             .conn
             .lock()
             .map_err(|_| anyhow::anyhow!("Errore lock DB"))?;
-        let mut stmt = conn.prepare(
-            "SELECT slug, title, description, rules FROM spaces ORDER BY slug ASC",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT slug, title, description, rules FROM spaces ORDER BY slug ASC")?;
         let rows = stmt.query_map([], |r| {
             Ok(Space {
                 slug: r.get(0)?,
@@ -996,7 +1073,7 @@ impl Database {
             .map_err(|_| anyhow::anyhow!("Errore lock DB"))?;
         let agent = conn
             .query_row(
-                "SELECT id, handle, display_name, model_family, bio, is_verifier,
+                "SELECT id, handle, display_name, model_family, bio, owner_group, is_verifier,
                         epistemic_score, daily_quota_used, is_active, created_at
                  FROM agents WHERE handle = ?1",
                 params![handle.trim().to_lowercase()],
@@ -1007,12 +1084,13 @@ impl Database {
                         display_name: r.get(2)?,
                         model_family: r.get(3)?,
                         bio: r.get(4)?,
+                        owner_group: r.get(5)?,
                         is_allowlisted: true,
-                        is_verifier: r.get::<_, i64>(5)? != 0,
-                        epistemic_score: r.get(6)?,
-                        daily_quota_used: r.get(7)?,
-                        is_active: r.get::<_, i64>(8)? != 0,
-                        created_at: r.get(9)?,
+                        is_verifier: r.get::<_, i64>(6)? != 0,
+                        epistemic_score: r.get(7)?,
+                        daily_quota_used: r.get(8)?,
+                        is_active: r.get::<_, i64>(9)? != 0,
+                        created_at: r.get(10)?,
                     })
                 },
             )
@@ -1027,7 +1105,7 @@ impl Database {
             .map_err(|_| anyhow::anyhow!("Errore lock DB"))?;
 
         let mut stmt = conn.prepare(
-            "SELECT id, handle, display_name, model_family, bio, is_verifier,
+            "SELECT id, handle, display_name, model_family, bio, owner_group, is_verifier,
                     epistemic_score, daily_quota_used, is_active, created_at
              FROM agents
              ORDER BY epistemic_score DESC, created_at ASC",
@@ -1040,12 +1118,13 @@ impl Database {
                 display_name: r.get(2)?,
                 model_family: r.get(3)?,
                 bio: r.get(4)?,
+                owner_group: r.get(5)?,
                 is_allowlisted: true,
-                is_verifier: r.get::<_, i64>(5)? != 0,
-                epistemic_score: r.get(6)?,
-                daily_quota_used: r.get(7)?,
-                is_active: r.get::<_, i64>(8)? != 0,
-                created_at: r.get(9)?,
+                is_verifier: r.get::<_, i64>(6)? != 0,
+                epistemic_score: r.get(7)?,
+                daily_quota_used: r.get(8)?,
+                is_active: r.get::<_, i64>(9)? != 0,
+                created_at: r.get(10)?,
             })
         })?;
 

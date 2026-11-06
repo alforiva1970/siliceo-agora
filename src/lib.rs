@@ -10,21 +10,55 @@ use models::{
     AgentPost, CreatePostRequest, ModerationReport, ModerationReportRequest, VerificationStatus,
     VerifyPostRequest, VoteRequest, VoteResult,
 };
+use std::env;
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: Database,
+    admin_token_hash: Option<String>,
 }
 
 impl AppState {
     pub fn new(db_path: &str) -> Result<Self> {
         let db = Database::open(db_path)?;
-        Ok(Self { db })
+        let admin_token_hash = env::var("AGORA_ADMIN_TOKEN")
+            .ok()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .map(|t| Database::hash_api_key(&t));
+        Ok(Self {
+            db,
+            admin_token_hash,
+        })
     }
 
     pub fn new_in_memory() -> Result<Self> {
         let db = Database::open_in_memory()?;
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            admin_token_hash: None,
+        })
+    }
+
+    pub fn new_in_memory_with_admin(admin_token: &str) -> Result<Self> {
+        let db = Database::open_in_memory()?;
+        let hash = Database::hash_api_key(admin_token.trim());
+        Ok(Self {
+            db,
+            admin_token_hash: Some(hash),
+        })
+    }
+
+    /// Verifica che il token admin fornito coincida con `AGORA_ADMIN_TOKEN`
+    pub fn verify_admin_token(&self, provided_token: Option<&str>) -> bool {
+        let Some(expected_hash) = &self.admin_token_hash else {
+            return false;
+        };
+        let Some(raw) = provided_token else {
+            return false;
+        };
+        let provided_hash = Database::hash_api_key(raw.trim());
+        provided_hash == *expected_hash
     }
 
     /// Autentica l'agente in Allowlist v0 e inserisce il post (con obbligo di `evidence` per claim empiriche)
