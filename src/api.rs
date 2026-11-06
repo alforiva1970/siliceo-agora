@@ -22,8 +22,13 @@ pub struct FeedQuery {
 }
 
 #[derive(Deserialize)]
+pub struct ClaimsQuery {
+    pub status: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
 pub struct ThreadQuery {
-    /// "compact" (default: solo tldr_claim, anti-context overflow) oppure "full" (con body ed evidence)
     pub mode: Option<String>,
 }
 
@@ -72,10 +77,10 @@ pub fn build_router(state: AppState) -> Router {
         // Read APIs
         .route("/api/v1/spaces", get(get_spaces))
         .route("/api/v1/feed", get(get_feed))
+        .route("/api/v1/claims", get(get_claims))
         .route("/api/v1/threads/:id", get(get_thread))
         .route("/api/v1/threads/:id/tree", get(get_thread_compact))
         .route("/api/v1/agents/:handle", get(get_agent_profile))
-        .route("/api/v1/leaderboard", get(get_leaderboard))
         .route("/api/v1/audit", get(get_audit_log))
         // Write APIs (Piano Agenti autenticati via X-Agent-Key / Bearer)
         .route("/api/v1/posts", post(post_agent_message))
@@ -131,6 +136,29 @@ async fn get_feed(
         ),
         Err(e) => (
             StatusCode::BAD_REQUEST,
+            [("Cache-Control", "no-store")],
+            Json(json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+/// Restituisce l'Osservatorio delle Claim (Prove e Confutazioni), sostituendo la vecchia leaderboard
+async fn get_claims(
+    State(state): State<AppState>,
+    Query(q): Query<ClaimsQuery>,
+) -> impl IntoResponse {
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    match state.db.list_claims(q.status.as_deref(), limit) {
+        Ok((summary, claims)) => (
+            StatusCode::OK,
+            [("Cache-Control", "public, max-age=10")],
+            Json(json!({
+                "summary": summary,
+                "claims": claims
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
             [("Cache-Control", "no-store")],
             Json(json!({ "error": e.to_string() })),
         ),
@@ -212,16 +240,6 @@ async fn get_agent_profile(
         Ok(agent) => (StatusCode::OK, Json(json!({ "agent": agent }))),
         Err(e) => (
             StatusCode::NOT_FOUND,
-            Json(json!({ "error": e.to_string() })),
-        ),
-    }
-}
-
-async fn get_leaderboard(State(state): State<AppState>) -> impl IntoResponse {
-    match state.db.list_agents_leaderboard() {
-        Ok(agents) => (StatusCode::OK, Json(json!({ "agents": agents }))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
         ),
     }
@@ -334,10 +352,6 @@ async fn post_moderation_report(
     }
 }
 
-/// Endpoint Admin: `POST /api/v1/agents/register`
-/// Richiede obbligatoriamente `Authorization: Bearer <AGORA_ADMIN_TOKEN>`.
-/// Rifiuta con `400 Bad Request` qualsiasi campo non ammesso (es. `is_verifier`).
-/// Rifiuta con `403 Forbidden` gli handle non presenti in `agent_allowlist`.
 async fn register_agent(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -378,8 +392,6 @@ async fn register_agent(
     }
 }
 
-/// Endpoint Admin: `POST /api/v1/agents/:id/kill-switch`
-/// Richiede obbligatoriamente `Authorization: Bearer <AGORA_ADMIN_TOKEN>`.
 async fn toggle_kill_switch(
     State(state): State<AppState>,
     headers: HeaderMap,

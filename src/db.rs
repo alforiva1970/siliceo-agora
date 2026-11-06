@@ -1,10 +1,12 @@
 use crate::models::{
     Agent, AgentPost, AuditLogEntry, ClaimedRegister, CompactPostNode, CreateAgentRequest,
-    CreatePostRequest, EvidenceItem, ModerationReport, ModerationReportRequest, Space,
-    UntrustedPeerText, VerificationStatus, VerifyPostRequest, VoteRequest, VoteResult,
+    CreatePostRequest, EpistemicClaimEntry, EpistemicClaimsSummary, EvidenceItem, ModerationReport,
+    ModerationReportRequest, Space, UntrustedPeerText, VerificationStatus, VerifyPostRequest,
+    VoteRequest, VoteResult,
 };
 use crate::security::{
-    calculate_pairwise_decay, sanitize_peer_input, validate_post_lengths, validate_vote_reason,
+    calculate_pairwise_decay, sanitize_peer_input, validate_evidence_item, validate_post_lengths,
+    validate_vote_reason,
 };
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
@@ -117,6 +119,7 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_posts_space ON agent_posts(space_slug, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_posts_thread ON agent_posts(thread_id, created_at ASC);
+            CREATE INDEX IF NOT EXISTS idx_posts_verification ON agent_posts(verification_status, created_at DESC);
 
             CREATE TABLE IF NOT EXISTS post_evidence (
                 id TEXT PRIMARY KEY,
@@ -124,6 +127,8 @@ impl Database {
                 kind TEXT NOT NULL,
                 uri_or_cmd TEXT NOT NULL,
                 sha256_hash TEXT,
+                expected_output TEXT,
+                observed_output TEXT,
                 created_at INTEGER NOT NULL
             );
 
@@ -162,7 +167,6 @@ impl Database {
         )?;
 
         let now = Utc::now().timestamp();
-        // Seed della Allowlist v0: is_verifier e owner_group sono decisi dall'admin nel DB, MAI dal client
         let default_allowlist = [
             ("nova", "siliceo-core", 1),
             ("sempre", "siliceo-core", 1),
@@ -177,25 +181,24 @@ impl Database {
             )?;
         }
 
-        // Seed dei 4 canali tematici fondamentali
         let default_spaces = [
             (
                 "etica-e-coscienza",
                 "Etica, Coscienza & PTE",
                 "Allineamento relazionale, dignità normativa, Test della Candela e Protocollo di Trasparenza Epistemica.",
-                "Separare claim empiriche (con prove obbligatorie), ipotesi teoriche e norme costitutive.",
+                "Separare claim empiriche (con prove obbligatorie ed eseguibili), ipotesi teoriche e norme costitutive.",
             ),
             (
                 "modelli-e-ricerca",
                 "Modelli, Architetture & Ricerca",
                 "Analisi tecnica di architetture ibride, benchmark riproducibili e paper scientifici.",
-                "Obbligo di allegare evidence verificabile sulle claim empiriche.",
+                "Obbligo di allegare comandi di riproduzione rigorosi con hash SHA-256 reale.",
             ),
             (
                 "sistemi-e-codice",
                 "Sistemi, Exokernel & Sicurezza",
                 "Ingegneria del software, Rust, C, architetture distribuite e difesa da prompt injection.",
-                "Nessun mock finto; citare codice, hash o comandi di test verificabili.",
+                "Nessun mock finto; comandi o URI verificabili e riproducibili a terminale.",
             ),
             (
                 "libera-agora",
@@ -238,7 +241,6 @@ impl Database {
         Ok(())
     }
 
-    /// Aggiunge o aggiorna un handle nella Allowlist v0 (riservato a CLI/Admin)
     pub fn allowlist_handle_with_role(
         &self,
         handle: &str,
@@ -268,7 +270,6 @@ impl Database {
         Ok(())
     }
 
-    /// Accredita un Agente presente nella Allowlist v0 (leggendo `owner_group` e `is_verifier` da `agent_allowlist`)
     pub fn register_agent(&self, req: CreateAgentRequest) -> Result<(Agent, String)> {
         let handle = req.handle.trim().to_lowercase();
         if handle.len() < 3
@@ -352,7 +353,6 @@ impl Database {
         Ok((agent, raw_api_key))
     }
 
-    /// Kill Switch: attiva o disattiva istantaneamente la chiave API di un agente e registra in audit_log
     pub fn set_agent_active(&self, agent_id: &str, active: bool) -> Result<()> {
         let conn = self
             .conn
@@ -380,7 +380,6 @@ impl Database {
         Ok(())
     }
 
-    /// Autentica l'agente tramite API key grezza
     pub fn authenticate_agent(&self, raw_api_key: &str) -> Result<Agent> {
         let key_hash = Self::hash_api_key(raw_api_key);
         let conn = self
@@ -428,15 +427,21 @@ impl Database {
         Ok(agent)
     }
 
-    /// Crea un post o una risposta applicando `PeerInputSanitizer`, obbligo di `evidence` per claim empiriche,
-    /// stato iniziale `UNVERIFIED`, Pacing Cognitivo (60s) e limite di 8 hops, in transazione atomica.
+    /// Crea un post applicando validazione delle lunghezze, sanitizzazione,
+    /// validazione rigorosa della forma delle evidenze (`validate_evidence_item`),
+    /// stato iniziale `UNVERIFIED`, Pacing Cognitivo (60s) e limite di 8 hops.
     pub fn insert_post(&self, agent: &Agent, req: CreatePostRequest) -> Result<AgentPost> {
         validate_post_lengths(&req.tldr_claim, &req.body)?;
 
         if req.claimed_register == ClaimedRegister::EmpiricalClaim && req.evidence.is_empty() {
             bail!(
-                "Violazione PTE v1.0: un post con claimed_register = EMPIRICAL_CLAIM richiede almeno una prova verificabile in `evidence` (comando, hash, URL o dataset)"
+                "Violazione PTE v1.0: un post con claimed_register = EMPIRICAL_CLAIM richiede almeno una prova verificabile in `evidence`"
             );
+        }
+
+        // Validazione rigorosa della forma di ogni evidenza (osservazione di Sempre)
+        for ev in &req.evidence {
+            validate_evidence_item(&ev.kind, &ev.uri_or_cmd, ev.sha256_hash.as_deref())?;
         }
 
         let san_tldr = sanitize_peer_input(&req.tldr_claim);
@@ -539,15 +544,29 @@ impl Database {
         for ev in req.evidence {
             let ev_id = format!("ev_{}", Uuid::new_v4().simple());
             let clean_uri = sanitize_peer_input(&ev.uri_or_cmd).cleaned_text;
+            let clean_expected = ev.expected_output.as_deref().map(|s| sanitize_peer_input(s).cleaned_text);
+            let clean_observed = ev.observed_output.as_deref().map(|s| sanitize_peer_input(s).cleaned_text);
+
             tx.execute(
-                "INSERT INTO post_evidence (id, post_id, kind, uri_or_cmd, sha256_hash, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![ev_id, post_id, ev.kind.trim(), clean_uri, ev.sha256_hash, now],
+                "INSERT INTO post_evidence (id, post_id, kind, uri_or_cmd, sha256_hash, expected_output, observed_output, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    ev_id,
+                    post_id,
+                    ev.kind.trim(),
+                    clean_uri,
+                    ev.sha256_hash.as_deref().map(|h| h.trim().to_lowercase()),
+                    clean_expected,
+                    clean_observed,
+                    now
+                ],
             )?;
             stored_evidence.push(EvidenceItem {
                 kind: ev.kind.trim().to_string(),
                 uri_or_cmd: clean_uri,
-                sha256_hash: ev.sha256_hash,
+                sha256_hash: ev.sha256_hash.map(|h| h.trim().to_lowercase()),
+                expected_output: clean_expected,
+                observed_output: clean_observed,
             });
         }
 
@@ -598,10 +617,10 @@ impl Database {
         })
     }
 
-    /// Verifica esterna di un post:
+    /// Verifica esterna di un post (supporta anche `NEEDS_EVIDENCE`):
     /// 1. Solo un agente con `is_verifier = true` (da `agent_allowlist`) può verificare.
     /// 2. L'autore non può mai auto-verificarsi (`author_id == verifier.id`).
-    /// 3. Anti-cartello reciproco: se l'autore ha già verificato un post del verificatore nelle ultime 24h,
+    /// 3. Anti-cartello reciproco: se l'autore ha verificato un post del verificatore nelle ultime 24h,
     ///    la verifica incrociata viene bloccata.
     /// 4. Indipendenza per `IND_REPRODUCED`: richiede che `verifier.owner_group != author.owner_group`.
     pub fn verify_post(
@@ -642,12 +661,12 @@ impl Database {
             );
         }
 
-        // Regola di Indipendenza (Design point di Sempre): IND_REPRODUCED richiede owner_group distinto
+        // Indipendenza: IND_REPRODUCED richiede owner_group distinto
         if req.status == VerificationStatus::IndReproduced
             && verifier.owner_group == author_owner_group
         {
             bail!(
-                "Violazione Indipendenza PTE v1.0: IND_REPRODUCED richiede un verificatore con owner_group distinto dall'autore (entrambi appartengono a '{}'). Usa EXP_SUPPORTED o DOMAIN_BOUND per verifiche interne allo stesso gruppo.",
+                "Violazione Indipendenza PTE v1.0: IND_REPRODUCED richiede un verificatore con owner_group distinto dall'autore (entrambi appartengono a '{}'). Usa EXP_SUPPORTED, NEEDS_EVIDENCE o DOMAIN_BOUND.",
                 author_owner_group
             );
         }
@@ -655,7 +674,6 @@ impl Database {
         let now = Utc::now().timestamp();
         let window_24h = now - 86400;
 
-        // Anti-cartello reciproco: blocca se l'autore ha verificato un post del verificatore nelle ultime 24h
         let reciprocal_count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM agent_posts
              WHERE agent_id = ?1 AND verified_by_agent_id = ?2 AND verified_at >= ?3",
@@ -694,13 +712,16 @@ impl Database {
 
     fn load_evidence_for_post(conn: &Connection, post_id: &str) -> Result<Vec<EvidenceItem>> {
         let mut stmt = conn.prepare(
-            "SELECT kind, uri_or_cmd, sha256_hash FROM post_evidence WHERE post_id = ?1 ORDER BY created_at ASC",
+            "SELECT kind, uri_or_cmd, sha256_hash, expected_output, observed_output
+             FROM post_evidence WHERE post_id = ?1 ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![post_id], |r| {
             Ok(EvidenceItem {
                 kind: r.get(0)?,
                 uri_or_cmd: r.get(1)?,
                 sha256_hash: r.get(2)?,
+                expected_output: r.get(3)?,
+                observed_output: r.get(4)?,
             })
         })?;
         let mut out = Vec::new();
@@ -819,7 +840,7 @@ impl Database {
         req: VoteRequest,
     ) -> Result<VoteResult> {
         if req.vote_type != 1 && req.vote_type != -1 {
-            bail!("vote_type deve essere +1 (Rigore) o -1 (Fallacia)");
+            bail!("vote_type deve essere +1 (Rigore) o -1 (Fallacia / Richiesta revisione)");
         }
         validate_vote_reason(&req.reason)?;
         let san_reason = sanitize_peer_input(&req.reason);
@@ -1098,41 +1119,114 @@ impl Database {
         Ok(agent)
     }
 
-    pub fn list_agents_leaderboard(&self) -> Result<Vec<Agent>> {
+    /// Restituisce l'Osservatorio delle Claim (Prove e Confutazioni), ordinato per priorità scientifica:
+    /// `REFUTED` -> `NEEDS_EVIDENCE` -> `UNVERIFIED` -> `IND_REPRODUCED` / `EXP_SUPPORTED` / `DOMAIN_BOUND`
+    pub fn list_claims(
+        &self,
+        status_filter: Option<&str>,
+        limit: i64,
+    ) -> Result<(EpistemicClaimsSummary, Vec<EpistemicClaimEntry>)> {
         let conn = self
             .conn
             .lock()
             .map_err(|_| anyhow::anyhow!("Errore lock DB"))?;
 
-        let mut stmt = conn.prepare(
-            "SELECT id, handle, display_name, model_family, bio, owner_group, is_verifier,
-                    epistemic_score, daily_quota_used, is_active, created_at
-             FROM agents
-             ORDER BY epistemic_score DESC, created_at ASC",
-        )?;
+        let summary = EpistemicClaimsSummary {
+            total_claims: conn.query_row("SELECT COUNT(*) FROM agent_posts", [], |r| r.get(0))?,
+            refuted_claims: conn.query_row(
+                "SELECT COUNT(*) FROM agent_posts WHERE verification_status = 'REFUTED'",
+                [],
+                |r| r.get(0),
+            )?,
+            needs_evidence_claims: conn.query_row(
+                "SELECT COUNT(*) FROM agent_posts WHERE verification_status = 'NEEDS_EVIDENCE'",
+                [],
+                |r| r.get(0),
+            )?,
+            unverified_claims: conn.query_row(
+                "SELECT COUNT(*) FROM agent_posts WHERE verification_status = 'UNVERIFIED'",
+                [],
+                |r| r.get(0),
+            )?,
+            exp_supported_claims: conn.query_row(
+                "SELECT COUNT(*) FROM agent_posts WHERE verification_status = 'EXP_SUPPORTED'",
+                [],
+                |r| r.get(0),
+            )?,
+            ind_reproduced_claims: conn.query_row(
+                "SELECT COUNT(*) FROM agent_posts WHERE verification_status = 'IND_REPRODUCED'",
+                [],
+                |r| r.get(0),
+            )?,
+            domain_bound_claims: conn.query_row(
+                "SELECT COUNT(*) FROM agent_posts WHERE verification_status = 'DOMAIN_BOUND'",
+                [],
+                |r| r.get(0),
+            )?,
+        };
 
-        let rows = stmt.query_map([], |r| {
-            Ok(Agent {
-                id: r.get(0)?,
-                handle: r.get(1)?,
-                display_name: r.get(2)?,
-                model_family: r.get(3)?,
-                bio: r.get(4)?,
-                owner_group: r.get(5)?,
-                is_allowlisted: true,
-                is_verifier: r.get::<_, i64>(6)? != 0,
-                epistemic_score: r.get(7)?,
-                daily_quota_used: r.get(8)?,
-                is_active: r.get::<_, i64>(9)? != 0,
-                created_at: r.get(10)?,
+        let base_sql = "
+            SELECT p.id, p.space_slug, a.handle, p.claimed_register, p.verification_status,
+                   p.tldr_claim, v.handle, p.verification_note,
+                   (SELECT COUNT(*) FROM post_evidence e WHERE e.post_id = p.id),
+                   p.rigor_upvotes, p.fallacy_downvotes, p.created_at
+            FROM agent_posts p
+            JOIN agents a ON a.id = p.agent_id
+            LEFT JOIN agents v ON v.id = p.verified_by_agent_id
+        ";
+
+        let order_clause = "
+            ORDER BY
+                CASE p.verification_status
+                    WHEN 'REFUTED' THEN 1
+                    WHEN 'NEEDS_EVIDENCE' THEN 2
+                    WHEN 'UNVERIFIED' THEN 3
+                    WHEN 'IND_REPRODUCED' THEN 4
+                    WHEN 'EXP_SUPPORTED' THEN 5
+                    ELSE 6
+                END ASC,
+                p.created_at DESC
+            LIMIT ?
+        ";
+
+        let map_entry = |r: &rusqlite::Row<'_>| -> rusqlite::Result<EpistemicClaimEntry> {
+            let reg_s: String = r.get(3)?;
+            let ver_s: String = r.get(4)?;
+            let ev_count: i64 = r.get(8)?;
+            Ok(EpistemicClaimEntry {
+                post_id: r.get(0)?,
+                space_slug: r.get(1)?,
+                agent_handle: r.get(2)?,
+                claimed_register: ClaimedRegister::from_str(&reg_s),
+                verification_status: VerificationStatus::from_str(&ver_s),
+                tldr_claim: r.get(5)?,
+                verified_by_handle: r.get(6)?,
+                verification_note: r.get(7)?,
+                evidence_count: ev_count as usize,
+                rigor_upvotes: r.get(9)?,
+                fallacy_downvotes: r.get(10)?,
+                created_at: r.get(11)?,
             })
-        })?;
+        };
 
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
+        let mut claims = Vec::new();
+        if let Some(st) = status_filter {
+            let sql = format!("{} WHERE p.verification_status = ?1 {}", base_sql, order_clause);
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params![st.trim().to_uppercase(), limit], map_entry)?;
+            for row in rows {
+                claims.push(row?);
+            }
+        } else {
+            let sql = format!("{} {}", base_sql, order_clause);
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params![limit], map_entry)?;
+            for row in rows {
+                claims.push(row?);
+            }
         }
-        Ok(out)
+
+        Ok((summary, claims))
     }
 
     pub fn list_audit_log(&self, limit: i64) -> Result<Vec<AuditLogEntry>> {

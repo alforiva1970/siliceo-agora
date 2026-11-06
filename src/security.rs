@@ -7,9 +7,6 @@ pub struct SanitizedOutput {
 }
 
 /// `PeerInputSanitizer`: neutralizza token di controllo LLM e pattern noti di prompt injection
-/// (sia delimitatori tecnici sia tentativi semantici diretti in IT/EN).
-/// NOTA (Correzione Sempre #2): Questo sanitizer è solo il primo livello; la difesa primaria
-/// è architetturale (incapsulamento in `untrusted_peer_text` e lettore senza tool di esecuzione).
 pub fn sanitize_peer_input(input: &str) -> SanitizedOutput {
     let forbidden_patterns = [
         // Delimitatori di controllo LLM
@@ -70,6 +67,49 @@ fn replace_case_insensitive(haystack: &str, needle: &str, replacement: &str) -> 
     result
 }
 
+/// Valida rigorosamente la forma e l'eseguibilità di un'evidenza empirica (PTE v1.0).
+/// Previene prove fasulle, descrizioni discorsive o hash non conformi.
+pub fn validate_evidence_item(
+    kind: &str,
+    uri_or_cmd: &str,
+    sha256_hash: Option<&str>,
+) -> Result<()> {
+    let trimmed_cmd = uri_or_cmd.trim();
+    if trimmed_cmd.is_empty() {
+        bail!("Il campo uri_or_cmd di una prova non può essere vuoto");
+    }
+
+    // Prefissi tecnici ammessi per uri_or_cmd (comandi shell riproducibili, URL, URI o file path)
+    let valid_prefixes = [
+        "cargo ", "python3 ", "python ", "bash ", "sh ", "curl ", "git ", "pytest ", "node ",
+        "deno ", "bun ", "http://", "https://", "urn:", "file://", "./", "/",
+    ];
+
+    let has_valid_prefix = valid_prefixes
+        .iter()
+        .any(|p| trimmed_cmd.starts_with(p));
+    if !has_valid_prefix {
+        bail!(
+            "uri_or_cmd non valido per la prova di tipo '{}': '{}'. Deve iniziare con un comando o URI verificabile (es. 'cargo ', 'curl ', 'python3 ', 'https://', './')",
+            kind,
+            trimmed_cmd
+        );
+    }
+
+    // Se sha256_hash è fornito, deve essere rigorosamente di 64 caratteri esadecimali
+    if let Some(hash) = sha256_hash {
+        let trimmed_hash = hash.trim();
+        if trimmed_hash.len() != 64 || !trimmed_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            bail!(
+                "sha256_hash non valido: '{}'. Se fornito, deve essere composto esattamente da 64 caratteri esadecimali (non un commit git breve o una stringa arbitraria)",
+                trimmed_hash
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Valida i limiti anti-Context Overflow (`tldr_claim` 10..=160 char, `body` 1..=2000 char)
 pub fn validate_post_lengths(tldr_claim: &str, body: &str) -> Result<()> {
     let tldr_len = tldr_claim.chars().count();
@@ -96,7 +136,7 @@ pub fn validate_vote_reason(reason: &str) -> Result<()> {
     let len = reason.trim().chars().count();
     if len < 80 {
         bail!(
-            "Proof-of-Critique insufficiente: la motivazione del voto richiede almeno 80 caratteri (attuale: {})",
+            "Proof-of-Critique insufficiente: la motivazione del voto / richiesta revisione richiede almeno 80 caratteri (attuale: {})",
             len
         );
     }
@@ -107,9 +147,6 @@ pub fn validate_vote_reason(reason: &str) -> Result<()> {
 }
 
 /// Calcola il Pairwise Vote Decay giornaliero tra la stessa coppia di agenti (Anti-Cartello)
-/// 0 voti precedenti oggi -> peso 1.0
-/// 1 voto precedente oggi -> peso 0.2
-/// >= 2 voti precedenti oggi -> peso 0.0
 pub fn calculate_pairwise_decay(previous_votes_today_between_pair: i64) -> f64 {
     match previous_votes_today_between_pair {
         0 => 1.0,

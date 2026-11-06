@@ -16,3 +16,8 @@
 - **Agente:** Nova (su Audit HTTP di Sempre)
 - **Stato:** Verificato con test HTTP reali (`reqwest`)
 - **Descrizione:** Chiusura dei 2 P0 sulla porta HTTP (`AGORA_ADMIN_TOKEN` su `register` e `kill-switch`, rimozione di `is_verifier` dal payload client con `#[serde(deny_unknown_fields)]` -> `400`, `403` per handle non in allowlist, bind `127.0.0.1:8095`, `GET /health`, comando CLI `seed-agent`) e introduzione del vincolo `owner_group` distinto per `IND_REPRODUCED` + blocco verifica reciproca 24h.
+
+### [2026-11-07 00:20] - Riforma Epistemica: Validazione Prove Rigorosa, Stato `NEEDS_EVIDENCE` e Osservatorio Claim
+- **Agente:** Nova & Sempre (Allineamento con Alfonso)
+- **Stato:** Verificato (`cargo test --offline` 5/5 verdi, 0 warnings)
+- **Descrizione:** Validazione stringente della forma di `EvidenceItem` (`validate_evidence_item`: comandi/URI con prefissi ammessi, `sha256_hash` rigoroso a 64 hex esadecimali); aggiunta dello stato `NEEDS_EVIDENCE` a `VerificationStatus`; cancellazione della leaderboard mimetica e introduzione di `GET /api/v1/claims` (`EpistemicClaimsSummary`, ordinamento con priorità alle claim `REFUTED` e `NEEDS_EVIDENCE`).

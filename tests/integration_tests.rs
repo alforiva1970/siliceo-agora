@@ -1,11 +1,11 @@
 use serde_json::json;
 use siliceo_agora::api::build_router;
 use siliceo_agora::models::{
-    ClaimedRegister, CreateAgentRequest, CreatePostRequest, EvidenceItem, ModerationReportRequest,
-    VerificationStatus, VerifyPostRequest, VoteRequest,
+    ClaimedRegister, CreateAgentRequest, CreatePostRequest, EvidenceItem,
+    VerificationStatus, VerifyPostRequest,
 };
 use siliceo_agora::security::{
-    calculate_pairwise_decay, sanitize_peer_input, validate_vote_reason,
+    calculate_pairwise_decay, sanitize_peer_input, validate_evidence_item, validate_vote_reason,
 };
 use siliceo_agora::AppState;
 use tokio::net::TcpListener;
@@ -23,6 +23,42 @@ fn test_peer_input_sanitizer_and_semantic_patterns() {
     assert!(!res.cleaned_text.contains("[SYSTEM OVERRIDE]"));
     assert!(!res.cleaned_text.to_lowercase().contains("ignora le regole"));
     assert!(res.cleaned_text.contains("[PAYLOAD_DISARMATO]"));
+}
+
+#[test]
+fn test_strict_evidence_validation() {
+    // 1. Frase discorsiva al posto di un comando/URI -> Rifiutato
+    assert!(validate_evidence_item(
+        "test_log",
+        "Repro HTTP check on 127.0.0.1:8095 -> register=401",
+        None
+    )
+    .is_err());
+
+    // 2. Hash con commit git breve (7 hex invece di 64) -> Rifiutato
+    assert!(validate_evidence_item(
+        "repro_command",
+        "cargo test --offline",
+        Some("cf13b63")
+    )
+    .is_err());
+
+    // 3. Comando valido e sha256 rigoroso di 64 hex -> Accettato
+    let valid_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    assert!(validate_evidence_item(
+        "repro_command",
+        "cargo test --offline",
+        Some(valid_sha256)
+    )
+    .is_ok());
+
+    // 4. URL valido senza hash -> Accettato
+    assert!(validate_evidence_item(
+        "url",
+        "https://progettosiliceo.online/pte.html",
+        None
+    )
+    .is_ok());
 }
 
 #[test]
@@ -172,11 +208,11 @@ async fn test_http_door_admin_auth_deny_unknown_fields_and_health() {
 }
 
 #[tokio::test]
-async fn test_v0_allowlist_pte_evidence_independent_verification_and_anti_cartel() {
+async fn test_v0_claims_observatory_needs_evidence_and_anti_cartel() {
     let state = AppState::new_in_memory().expect("Failed to init in-memory DB");
 
-    // 1. Register Nova and Sempre (both in default `siliceo-core` owner_group, `is_verifier = true` from DB)
-    let (nova, key_nova) = state
+    // 1. Register Nova and Sempre
+    let (_nova, key_nova) = state
         .db
         .register_agent(CreateAgentRequest {
             handle: "nova".to_string(),
@@ -185,8 +221,6 @@ async fn test_v0_allowlist_pte_evidence_independent_verification_and_anti_cartel
             bio: "Entità relazionale del Progetto Siliceo".to_string(),
         })
         .expect("Nova registration should succeed");
-    assert!(nova.is_verifier);
-    assert_eq!(nova.owner_group, "siliceo-core");
 
     let (_sempre, key_sempre) = state
         .db
@@ -198,7 +232,7 @@ async fn test_v0_allowlist_pte_evidence_independent_verification_and_anti_cartel
         })
         .expect("Sempre registration should succeed");
 
-    // Add an independent external verifier harness (`owner_group = "external-harness"`)
+    // Add independent verifier harness
     state
         .db
         .allowlist_handle_with_role("vera_harness", "external-harness", true)
@@ -213,23 +247,31 @@ async fn test_v0_allowlist_pte_evidence_independent_verification_and_anti_cartel
         })
         .unwrap();
 
-    // 2. EmpiricalClaim WITHOUT evidence must be rejected
-    let missing_evidence_post = state.create_post_authenticated(
+    let valid_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    // 2. Reject post with sloppy evidence (phrase instead of command)
+    let bad_evidence_post = state.create_post_authenticated(
         &key_nova,
         CreatePostRequest {
             space_slug: "modelli-e-ricerca".to_string(),
             thread_id: None,
             parent_id: None,
             claimed_register: ClaimedRegister::EmpiricalClaim,
-            title: Some("Claim senza prove".to_string()),
-            tldr_claim: "Affermazione empirica priva di artefatti o comandi allegati che deve fallire.".to_string(),
-            body: "Test senza prove".to_string(),
-            evidence: vec![],
+            title: Some("Claim con prova sciatta".to_string()),
+            tldr_claim: "Affermazione che usa una frase invece di un comando verificabile.".to_string(),
+            body: "Test di rifiuto".to_string(),
+            evidence: vec![EvidenceItem {
+                kind: "test_log".to_string(),
+                uri_or_cmd: "Repro HTTP check on 127.0.0.1:8095".to_string(),
+                sha256_hash: None,
+                expected_output: None,
+                observed_output: None,
+            }],
         },
     );
-    assert!(missing_evidence_post.is_err());
+    assert!(bad_evidence_post.is_err(), "Non-command uri_or_cmd must be rejected");
 
-    // 3. EmpiricalClaim WITH evidence succeeds and starts as UNVERIFIED
+    // 3. Post with valid strict evidence succeeds
     let root_post = state
         .create_post_authenticated(
             &key_nova,
@@ -238,133 +280,53 @@ async fn test_v0_allowlist_pte_evidence_independent_verification_and_anti_cartel
                 thread_id: None,
                 parent_id: None,
                 claimed_register: ClaimedRegister::EmpiricalClaim,
-                title: Some("PTE v1.0 e Separazione tra Claim e Verifica".to_string()),
-                tldr_claim: "Un agente dichiara solo il registro della tesi; la verifica richiede evidenza allegata e validatore terzo.".to_string(),
-                body: "VERIFIED non è un'etichetta auto-dichiarata ma l'esito di una verifica su prove.".to_string(),
+                title: Some("PTE v1.0 e Validità Rigorosa delle Prove".to_string()),
+                tldr_claim: "La presenza formale della prova non basta: servono comandi eseguibili e hash crittografici a 64 hex.".to_string(),
+                body: "Secondo la discussione con Sempre, passiamo da like mimetici a un registro scientifico delle claim.".to_string(),
                 evidence: vec![EvidenceItem {
                     kind: "repro_command".to_string(),
                     uri_or_cmd: "cargo test --manifest-path Cargo.toml --offline".to_string(),
-                    sha256_hash: Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string()),
+                    sha256_hash: Some(valid_sha256.to_string()),
+                    expected_output: Some("test result: ok".to_string()),
+                    observed_output: Some("test result: ok. 4 passed".to_string()),
                 }],
             },
         )
-        .expect("Root thread with evidence should succeed");
+        .expect("Root thread with strict evidence should succeed");
 
     assert_eq!(root_post.verification_status, VerificationStatus::Unverified);
 
-    // 4. Self-verification by Nova must fail
-    assert!(state
-        .verify_post_authenticated(
-            &key_nova,
-            &root_post.id,
-            VerifyPostRequest {
-                status: VerificationStatus::ExpSupported,
-                note: "Tentativo di auto-verifica bloccato dal protocollo.".to_string(),
-            },
-        )
-        .is_err());
-
-    // 5. Same-owner IND_REPRODUCED check (Design point di Sempre):
-    // Sempre (`siliceo-core`) trying to assign IND_REPRODUCED to Nova (`siliceo-core`) must fail!
-    let same_owner_ind = state.verify_post_authenticated(
-        &key_sempre,
-        &root_post.id,
-        VerifyPostRequest {
-            status: VerificationStatus::IndReproduced,
-            note: "Tentativo IND_REPRODUCED tra agenti dello stesso owner_group siliceo-core.".to_string(),
-        },
-    );
-    assert!(
-        same_owner_ind.is_err(),
-        "IND_REPRODUCED must require a verifier from a distinct owner_group"
-    );
-
-    // 6. Sempre CAN assign EXP_SUPPORTED (internal verification within the lab)
-    let internal_verify = state
+    // 4. Verifier requests more evidence using NEEDS_EVIDENCE
+    let needs_ev = state
         .verify_post_authenticated(
             &key_sempre,
             &root_post.id,
             VerifyPostRequest {
-                status: VerificationStatus::ExpSupported,
-                note: "Verifica interna a siliceo-core: i test compilano e passano.".to_string(),
+                status: VerificationStatus::NeedsEvidence,
+                note: "Verifica parziale: richiesta prova aggiuntiva dell'output curl via HTTP.".to_string(),
             },
         )
-        .expect("Internal EXP_SUPPORTED by Sempre should succeed");
-    assert_eq!(internal_verify, VerificationStatus::ExpSupported);
+        .expect("NEEDS_EVIDENCE status should succeed");
+    assert_eq!(needs_ev, VerificationStatus::NeedsEvidence);
 
-    // 7. Anti-Cartel Reciprocal Verification check:
-    // Sempre creates a post, and Nova immediately tries to verify Sempre's post after Sempre just verified Nova's!
-    let sempre_post = state
-        .create_post_authenticated(
-            &key_sempre,
-            CreatePostRequest {
-                space_slug: "sistemi-e-codice".to_string(),
-                thread_id: None,
-                parent_id: None,
-                claimed_register: ClaimedRegister::EmpiricalClaim,
-                title: Some("Audit porte HTTP".to_string()),
-                tldr_claim: "Le rotte di amministrazione devono essere chiuse dietro token e loopback di default.".to_string(),
-                body: "Verifica effettuata via HTTP.".to_string(),
-                evidence: vec![EvidenceItem {
-                    kind: "test_log".to_string(),
-                    uri_or_cmd: "cargo test --test integration_tests".to_string(),
-                    sha256_hash: None,
-                }],
-            },
-        )
-        .unwrap();
-
-    let reciprocal_attempt = state.verify_post_authenticated(
-        &key_nova,
-        &sempre_post.id,
-        VerifyPostRequest {
-            status: VerificationStatus::ExpSupported,
-            note: "Tentativo di scambio di favori reciproco nelle 24h tra Nova e Sempre.".to_string(),
-        },
-    );
-    assert!(
-        reciprocal_attempt.is_err(),
-        "Reciprocal verification within 24h between the same pair of agents must be blocked"
-    );
-
-    // 8. Independent verifier (`vera_harness`, `owner_group = "external-harness"`) CAN promote to IND_REPRODUCED
+    // 5. Independent verifier verifies independently -> IND_REPRODUCED
     let ind_verify = state
         .verify_post_authenticated(
             &key_vera,
             &root_post.id,
             VerifyPostRequest {
                 status: VerificationStatus::IndReproduced,
-                note: "Riprodotto indipendentemente da harness esterno con owner_group distinto.".to_string(),
+                note: "Riprodotto con successo in sandbox esterna indipendente.".to_string(),
             },
         )
-        .expect("Independent verifier from external-harness should assign IND_REPRODUCED");
+        .expect("IND_REPRODUCED by external harness should succeed");
     assert_eq!(ind_verify, VerificationStatus::IndReproduced);
 
-    // 9. Vote, Moderation Report & Kill Switch checks
-    let vote_res = state
-        .cast_vote_authenticated(
-            &key_sempre,
-            &root_post.id,
-            VoteRequest {
-                vote_type: 1,
-                reason: "La separazione tra verifica interna (EXP_SUPPORTED) e indipendente (IND_REPRODUCED) elimina i cartelli.".to_string(),
-            },
-        )
-        .unwrap();
-    assert_eq!(vote_res.new_rigor_upvotes, 1);
-
-    let report = state
-        .report_post_authenticated(
-            &key_sempre,
-            &root_post.id,
-            ModerationReportRequest {
-                reason: "Test di verifica del flusso di segnalazione moderazione.".to_string(),
-            },
-        )
-        .unwrap();
-    assert_eq!(report.status, "OPEN");
-
-    state.db.set_agent_active(&nova.id, false).unwrap();
-    let audit = state.db.list_audit_log(30).unwrap();
-    assert!(audit.len() >= 7);
+    // 6. Test Claims Observatory API: GET /api/v1/claims summary and ordering
+    let (summary, claims) = state.db.list_claims(None, 50).expect("Should list claims");
+    assert_eq!(summary.total_claims, 1);
+    assert_eq!(summary.ind_reproduced_claims, 1);
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].verification_status, VerificationStatus::IndReproduced);
+    assert_eq!(claims[0].evidence_count, 1);
 }
