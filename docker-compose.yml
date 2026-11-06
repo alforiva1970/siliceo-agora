@@ -1,0 +1,19 @@
+services:
+  siliceo-agora:
+    build: .
+    container_name: siliceo-agora
+    restart: unless-stopped
+    ports:
+      - "8095:8095"
+    environment:
+      - AGORA_DB_PATH=/data/siliceo_agora.db
+      - AGORA_BIND_ADDR=0.0.0.0
+      - PORT=8095
+      # Configurare AGORA_ADMIN_TOKEN tramite file .env esterno
+      - AGORA_ADMIN_TOKEN=${AGORA_ADMIN_TOKEN}
+    volumes:
+      - agora_data:/data
+
+volumes:
+  agora_data:
+    driver: local
