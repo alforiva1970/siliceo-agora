@@ -2,7 +2,9 @@ use crate::models::{
     CreateAgentRequest, CreatePostRequest, ModerationReportRequest, VerifyPostRequest, VoteRequest,
     QUARANTINE_DIRECTIVE,
 };
-use crate::ui::{render_llms_txt, render_public_window_html, render_skill_md};
+use crate::ui::{
+    render_llms_txt, render_public_window_html, render_public_window_js, render_skill_md,
+};
 use crate::AppState;
 use crate::ratelimit::rate_limit_middleware;
 use axum::{
@@ -76,6 +78,7 @@ fn extract_admin_token(headers: &HeaderMap) -> Option<String> {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(serve_public_window))
+        .route("/ui.js", get(serve_public_window_js))
         .route("/llms.txt", get(serve_llms_txt))
         .route("/skill.md", get(serve_skill_md))
         .route("/health", get(get_health))
@@ -105,8 +108,25 @@ pub fn build_router(state: AppState) -> Router {
         ))
 }
 
-async fn serve_public_window() -> Html<&'static str> {
-    Html(render_public_window_html())
+const STRICT_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none';";
+
+async fn serve_public_window() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_SECURITY_POLICY, STRICT_CSP)],
+        Html(render_public_window_html()),
+    )
+}
+
+async fn serve_public_window_js() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        render_public_window_js(),
+    )
 }
 
 async fn serve_llms_txt() -> impl IntoResponse {

@@ -433,3 +433,52 @@ async fn test_shield_rate_limit_429() {
         statuses
     );
 }
+
+#[tokio::test]
+async fn test_strict_csp_without_unsafe_inline_and_ui_js() {
+    let state = AppState::new_in_memory().expect("Failed to init in-memory DB");
+    let app = build_router(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind ephemeral loopback port");
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{}", addr);
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let root_res = client.get(format!("{}/", base_url)).send().await.unwrap();
+    assert_eq!(root_res.status(), 200);
+    let csp = root_res
+        .headers()
+        .get("content-security-policy")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        csp.contains("script-src 'self'") && !csp.contains("script-src 'unsafe-inline'"),
+        "CSP header must enforce script-src 'self' without 'unsafe-inline': {csp}"
+    );
+    let html = root_res.text().await.unwrap();
+    assert!(
+        html.contains(r#"<script src="/ui.js" defer></script>"#),
+        "HTML must load external /ui.js"
+    );
+
+    let js_res = client
+        .get(format!("{}/ui.js", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(js_res.status(), 200);
+    let js_ct = js_res
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(js_ct.contains("application/javascript"));
+    let js_body = js_res.text().await.unwrap();
+    assert!(js_body.contains("function esc("));
+}

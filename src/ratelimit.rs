@@ -52,10 +52,15 @@ impl RateLimiter {
             return false;
         }
         entry.push(now);
-        // Tetto anti-crescita: se le chiavi esplodono, spazza quelle scadute.
+        // Tetto anti-crescita: se le chiavi esplodono, spazza quelle scadute;
+        // se restano oltre il tetto hard (flood distribuito nella stessa finestra), azzera.
         if self.hits.len() > 8192 {
             self.hits
                 .retain(|_, v| !v.iter().all(|t| *t <= cutoff));
+            if self.hits.len() > 16384 {
+                self.hits.clear();
+                self.hits.insert(key.to_string(), vec![now]);
+            }
         }
         true
     }

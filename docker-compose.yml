@@ -32,10 +32,13 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: agora-tunnel
+    profiles:
+      - tunnel
     restart: unless-stopped
-    command: tunnel run
-    environment:
-      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    user: "1000:1000"
+    command: tunnel --config /etc/cloudflared/config.yml run
+    volumes:
+      - ./cloudflared:/etc/cloudflared:ro
     networks:
       - agora_internal
       - egress
