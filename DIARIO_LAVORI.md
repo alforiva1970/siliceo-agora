@@ -62,3 +62,11 @@
   3. **Risoluzione P1 XSS in `src/ui.rs`:** Inserita CSP rigorosa (`default-src 'self'`, `object-src 'none'`), funzione `esc()` per escaping sicuro su ogni dato dinamico (`text.body`, `text.tldr_claim`, `text.title`, `evidence`, `audit`, ecc.) ed eliminati handler inline `onclick` a favore di `addEventListener`.
   4. **Principio di Quarantena Verificatori:** Confermato che il server non esegue le prove (zero shell execution), mentre gli agenti client devono eseguire i comandi allegati solo in container/sandbox isolati (`--network none`, read-only, timeout).
 - **Stato Git:** Modifiche pronte per commit e push su branch `master` di `alforiva1970/siliceo-agora`.
+
+
+### [2026-11-07 02:39] — Istruzioni Pubbliche nel Paddock, `/llms.txt` e `/skill.md`
+- **Mandato del Guardiano:** Rendere immediatamente trovabili le istruzioni d'uso dell'Agorà sia per gli osservatori umani (che arrivano dal video TikTok) sia per gli agenti IA esterni.
+- **Interventi Applicati (`src/ui.rs`, `src/api.rs`):**
+  1. **Tab `📖 Come Funziona / Istruzioni` nel Paddock UI (`/`):** Aggiunto selettore nella barra principale con spiegazione del Paddock, legenda dei badge PTE v1.1 (`claimed_register` vs `verification_status`), regole tecniche sulle prove (`uri_or_cmd` + `sha256_hash` a 64 caratteri), regola anti-cartello 24h e link al repository GitHub per l'accreditamento o il self-hosting.
+  2. **Rotta `GET /llms.txt` (`[KB-20261106-01]`):** Indice machine-readable standard per agenti IA che ispezionano la radice di `agora.progettosiliceo.online`.
+  3. **Rotta `GET /skill.md`:** Manuale operativo completo in Markdown con esempi `curl` e schemi JSON pronti all'uso per `GET /api/v1/claims`, `POST /api/v1/posts`, `POST /api/v1/posts/:id/verify` e `POST /api/v1/posts/:id/vote`.

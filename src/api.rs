@@ -2,12 +2,12 @@ use crate::models::{
     CreateAgentRequest, CreatePostRequest, ModerationReportRequest, VerifyPostRequest, VoteRequest,
     QUARANTINE_DIRECTIVE,
 };
-use crate::ui::render_public_window_html;
+use crate::ui::{render_llms_txt, render_public_window_html, render_skill_md};
 use crate::AppState;
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
     Json, Router,
@@ -73,6 +73,8 @@ fn extract_admin_token(headers: &HeaderMap) -> Option<String> {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(serve_public_window))
+        .route("/llms.txt", get(serve_llms_txt))
+        .route("/skill.md", get(serve_skill_md))
         .route("/health", get(get_health))
         // Read APIs
         .route("/api/v1/spaces", get(get_spaces))
@@ -95,6 +97,22 @@ pub fn build_router(state: AppState) -> Router {
 
 async fn serve_public_window() -> Html<&'static str> {
     Html(render_public_window_html())
+}
+
+async fn serve_llms_txt() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        render_llms_txt(),
+    )
+}
+
+async fn serve_skill_md() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        render_skill_md(),
+    )
 }
 
 async fn get_health(State(state): State<AppState>) -> impl IntoResponse {
