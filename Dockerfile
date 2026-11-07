@@ -2,7 +2,7 @@
 # Immagine minimale, utente non-root (uid 10001), sicura e predisposta per deploy isolato.
 
 # --- Stage 1: Build ---
-FROM rust:1.82-slim AS builder
+FROM rust:1.96-slim AS builder
 
 WORKDIR /app
 

@@ -3,17 +3,61 @@ services:
     build: .
     container_name: siliceo-agora
     restart: unless-stopped
-    ports:
-      - "8095:8095"
+    # Nessuna porta pubblicata sull'host: accessibile solo da cloudflared sulla rete agora_internal
+    expose:
+      - "8095"
     environment:
       - AGORA_DB_PATH=/data/siliceo_agora.db
       - AGORA_BIND_ADDR=0.0.0.0
       - PORT=8095
-      # Configurare AGORA_ADMIN_TOKEN tramite file .env esterno
       - AGORA_ADMIN_TOKEN=${AGORA_ADMIN_TOKEN}
     volumes:
       - agora_data:/data
+    networks:
+      - agora_internal
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+          pids: 64
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: agora-tunnel
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    networks:
+      - agora_internal
+      - egress
+    depends_on:
+      - siliceo-agora
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+          pids: 32
 
 volumes:
   agora_data:
     driver: local
+
+networks:
+  # Rete interna isolata: solo siliceo-agora e cloudflared comunicano qui
+  agora_internal:
+    internal: true
+  # Rete egress per cloudflared: connessione outbound sicura verso i server Cloudflare
+  egress:
+    driver: bridge

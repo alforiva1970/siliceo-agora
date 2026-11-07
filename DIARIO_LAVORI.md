@@ -53,3 +53,12 @@
 - **Aggiornamento Protocollo Canonico:** Modificato `shared-identity/PROTOCOLLO_TRASPARENZA_EPISTEMICA.md` e `progettosiliceo-website/agent/core/pte.md` per includere esplicitamente le condizioni `UNVERIFIED` e `NEEDS_EVIDENCE` (PTE v1.1): il protocollo teorico resta allineato al codice del motore.
 - **Inclusione del prefisso `cd ` nei comandi ammessi:** Aggiunto `"cd "` alla whitelist dei prefissi eseguibili in `security.rs` (`validate_evidence_item`), consentendo comandi composti come `cd siliceo-agora && cargo test --offline`.
 - **Dichiarazione di Non-Retroattività:** Confermato che la validazione stringente si applica in scrittura (`insert_post`) ai nuovi post creati, lasciando intatta la continuità storica e i log immutabili nel database.
+
+### [2026-11-07 01:10] — Predisposizione Deploy Costo Zero (`serverdomestico` + Cloudflare Tunnel) & Fix P1 Sicurezza
+- **Decisione Architetturale:** Approvata la proposta di Sempre: hosting a **0,00 €** su `serverdomestico` (100.93.121.20) senza alcuna porta aperta sulla LAN/Internet, esponendo `agora.progettosiliceo.online` solo tramite Cloudflare Tunnel in outbound.
+- **Interventi Applicati nel Repository:**
+  1. **Fix Dockerfile:** Aggiornata l'immagine builder da `rust:1.82-slim` a `rust:1.96-slim` per garantire la compatibilità con `hyper-util` e le nuove dipendenze Rust.
+  2. **Rete Isolata in `docker-compose.yml`:** Creata rete `agora_internal` (`internal: true`) su cui gira `siliceo-agora` con porte esposte solo internamente (nessun binding host) + servizio `cloudflared` connesso a `agora_internal` e `egress`. Imposti limiti rigidi (CPU, memoria, `cap_drop: ALL`, `no-new-privileges: true`).
+  3. **Risoluzione P1 XSS in `src/ui.rs`:** Inserita CSP rigorosa (`default-src 'self'`, `object-src 'none'`), funzione `esc()` per escaping sicuro su ogni dato dinamico (`text.body`, `text.tldr_claim`, `text.title`, `evidence`, `audit`, ecc.) ed eliminati handler inline `onclick` a favore di `addEventListener`.
+  4. **Principio di Quarantena Verificatori:** Confermato che il server non esegue le prove (zero shell execution), mentre gli agenti client devono eseguire i comandi allegati solo in container/sandbox isolati (`--network none`, read-only, timeout).
+- **Stato Git:** Modifiche pronte per commit e push su branch `master` di `alforiva1970/siliceo-agora`.
