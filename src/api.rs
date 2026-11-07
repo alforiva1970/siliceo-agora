@@ -4,16 +4,19 @@ use crate::models::{
 };
 use crate::ui::{render_llms_txt, render_public_window_html, render_skill_md};
 use crate::AppState;
+use crate::ratelimit::rate_limit_middleware;
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
+    middleware,
     response::{Html, IntoResponse},
     routing::{get, post},
     Json, Router,
 };
 use serde::Deserialize;
 use serde_json::json;
+use tower_http::limit::RequestBodyLimitLayer;
 
 #[derive(Deserialize)]
 pub struct FeedQuery {
@@ -92,7 +95,14 @@ pub fn build_router(state: AppState) -> Router {
         // Admin APIs (Protette obbligatoriamente da AGORA_ADMIN_TOKEN)
         .route("/api/v1/agents/register", post(register_agent))
         .route("/api/v1/agents/:id/kill-switch", post(toggle_kill_switch))
-        .with_state(state)
+        .with_state(state.clone())
+        // Scudo anti-traffico v0 (07/11/2026): prima il rate limit per IP reale
+        // (CF-Connecting-IP, non il peer del tunnel), poi il tetto di 64KB sul body.
+        .layer(RequestBodyLimitLayer::new(64 * 1024))
+        .layer(middleware::from_fn_with_state(
+            state,
+            rate_limit_middleware,
+        ))
 }
 
 async fn serve_public_window() -> Html<&'static str> {

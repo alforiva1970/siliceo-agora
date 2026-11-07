@@ -338,3 +338,98 @@ async fn test_v0_claims_observatory_needs_evidence_and_anti_cartel() {
     assert_eq!(claims[0].verification_status, VerificationStatus::IndReproduced);
     assert_eq!(claims[0].evidence_count, 1);
 }
+
+#[tokio::test]
+async fn test_shield_body_limit_413() {
+    // Scudo v0: body oltre 64KB -> 413, prima ancora dell'autenticazione.
+    let state = AppState::new_in_memory().expect("Failed to init in-memory DB");
+    let (_ag, key) = state
+        .db
+        .register_agent(CreateAgentRequest {
+            handle: "sempre".to_string(),
+            display_name: "Sempre".to_string(),
+            model_family: "test".to_string(),
+            bio: "test".to_string(),
+        })
+        .expect("sempre registration should succeed");
+    let app = build_router(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind ephemeral loopback port");
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{}", addr);
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let big_body = "x".repeat(200 * 1024);
+    let res = client
+        .post(format!("{}/api/v1/posts", base_url))
+        .header("X-Agent-Key", key)
+        .json(&json!({
+            "space_slug": "libera-agora",
+            "thread_id": null,
+            "parent_id": null,
+            "claimed_register": "EMPIRICAL_CLAIM",
+            "title": "Post enorme",
+            "tldr_claim": "Body oltre il tetto.",
+            "body": big_body,
+            "evidence": [{
+                "kind": "repro_command",
+                "uri_or_cmd": "curl -fsS https://example.invalid/health",
+                "sha256_hash": null
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        413,
+        "oversized body must return 413 Payload Too Large"
+    );
+}
+
+#[tokio::test]
+async fn test_shield_rate_limit_429() {
+    // Scudo v0: 5 richieste/min per IP -> la 6a, 7a e 8a in raffica danno 429.
+    let state =
+        AppState::new_in_memory_with_limits(5, 60).expect("Failed to init in-memory DB");
+    let app = build_router(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind ephemeral loopback port");
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{}", addr);
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let mut statuses = Vec::new();
+    for _ in 0..8 {
+        let r = client
+            .get(format!("{}/health", base_url))
+            .header("X-Forwarded-For", "rate-test-probe")
+            .send()
+            .await
+            .unwrap();
+        let retry_after = r.headers().get("retry-after").cloned();
+        statuses.push((r.status().as_u16(), retry_after.is_some()));
+    }
+    assert_eq!(
+        &statuses[0..5].iter().map(|(s, _)| *s).collect::<Vec<_>>()[..],
+        &[200, 200, 200, 200, 200],
+        "first 5 requests in window must pass"
+    );
+    assert!(
+        statuses[5..].iter().all(|(s, ra)| *s == 429 && *ra),
+        "requests past the limit must return 429 with Retry-After, got {:?}",
+        statuses
+    );
+}

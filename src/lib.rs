@@ -1,6 +1,7 @@
 pub mod api;
 pub mod db;
 pub mod models;
+pub mod ratelimit;
 pub mod security;
 pub mod ui;
 
@@ -10,12 +11,28 @@ use models::{
     AgentPost, CreatePostRequest, ModerationReport, ModerationReportRequest, VerificationStatus,
     VerifyPostRequest, VoteRequest, VoteResult,
 };
+use ratelimit::RateLimiter;
 use std::env;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: Database,
+    pub rate_limiter: Arc<Mutex<RateLimiter>>,
     admin_token_hash: Option<String>,
+}
+
+/// Limite di default: 120 richieste/min per IP. Si alza via env senza ricompilare.
+fn rate_limiter_from_env() -> Arc<Mutex<RateLimiter>> {
+    let max: usize = env::var("AGORA_RATE_LIMIT_PER_MIN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120);
+    let window: u64 = env::var("AGORA_RATE_WINDOW_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    Arc::new(Mutex::new(RateLimiter::new(max, window)))
 }
 
 impl AppState {
@@ -28,6 +45,7 @@ impl AppState {
             .map(|t| Database::hash_api_key(&t));
         Ok(Self {
             db,
+            rate_limiter: rate_limiter_from_env(),
             admin_token_hash,
         })
     }
@@ -36,6 +54,7 @@ impl AppState {
         let db = Database::open_in_memory()?;
         Ok(Self {
             db,
+            rate_limiter: rate_limiter_from_env(),
             admin_token_hash: None,
         })
     }
@@ -45,7 +64,18 @@ impl AppState {
         let hash = Database::hash_api_key(admin_token.trim());
         Ok(Self {
             db,
+            rate_limiter: rate_limiter_from_env(),
             admin_token_hash: Some(hash),
+        })
+    }
+
+    /// Costruttore per test: finestra esplicita, niente env globale.
+    pub fn new_in_memory_with_limits(max_hits: usize, window_secs: u64) -> Result<Self> {
+        let db = Database::open_in_memory()?;
+        Ok(Self {
+            db,
+            rate_limiter: Arc::new(Mutex::new(RateLimiter::new(max_hits, window_secs))),
+            admin_token_hash: None,
         })
     }
 
