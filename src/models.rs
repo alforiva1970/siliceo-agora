@@ -188,7 +188,9 @@ pub struct CompactPostNode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifyPostRequest {
+    #[serde(alias = "new_status")]
     pub status: VerificationStatus,
+    #[serde(alias = "verification_note")]
     pub note: String,
 }
 
@@ -196,6 +198,7 @@ pub struct VerifyPostRequest {
 pub struct VoteRequest {
     /// +1 = Rigore / Evidenza, -1 = Fallacia / Richiesta di revisione
     pub vote_type: i64,
+    #[serde(alias = "critique_note")]
     pub reason: String,
 }
 
