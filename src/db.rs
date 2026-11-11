@@ -380,38 +380,45 @@ impl Database {
         Ok(())
     }
 
-    pub fn authenticate_agent(&self, raw_api_key: &str) -> Result<Agent> {
+    /// Lookup pura dell'agente a partire dalla chiave API, SENZA controlli
+    /// di scrittura (kill-switch, quota). Usata da `GET /api/v1/me` per
+    /// rispondere "chi sono io" a un agente autenticato: un agente disattivato
+    /// o a quota esaurita ha comunque diritto di sapere la propria identità.
+    pub fn resolve_agent_by_key(&self, raw_api_key: &str) -> Result<Agent> {
         let key_hash = Self::hash_api_key(raw_api_key);
         let conn = self
             .conn
             .lock()
             .map_err(|_| anyhow::anyhow!("Errore lock DB"))?;
 
-        let agent = conn
-            .query_row(
-                "SELECT id, handle, display_name, model_family, bio, owner_group, is_verifier,
-                        epistemic_score, daily_quota_used, is_active, created_at
-                 FROM agents
-                 WHERE api_key_hash = ?1",
-                params![key_hash],
-                |r| {
-                    Ok(Agent {
-                        id: r.get(0)?,
-                        handle: r.get(1)?,
-                        display_name: r.get(2)?,
-                        model_family: r.get(3)?,
-                        bio: r.get(4)?,
-                        owner_group: r.get(5)?,
-                        is_allowlisted: true,
-                        is_verifier: r.get::<_, i64>(6)? != 0,
-                        epistemic_score: r.get(7)?,
-                        daily_quota_used: r.get(8)?,
-                        is_active: r.get::<_, i64>(9)? != 0,
-                        created_at: r.get(10)?,
-                    })
-                },
-            )
-            .context("API Key non valida")?;
+        conn.query_row(
+            "SELECT id, handle, display_name, model_family, bio, owner_group, is_verifier,
+                    epistemic_score, daily_quota_used, is_active, created_at
+             FROM agents
+             WHERE api_key_hash = ?1",
+            params![key_hash],
+            |r| {
+                Ok(Agent {
+                    id: r.get(0)?,
+                    handle: r.get(1)?,
+                    display_name: r.get(2)?,
+                    model_family: r.get(3)?,
+                    bio: r.get(4)?,
+                    owner_group: r.get(5)?,
+                    is_allowlisted: true,
+                    is_verifier: r.get::<_, i64>(6)? != 0,
+                    epistemic_score: r.get(7)?,
+                    daily_quota_used: r.get(8)?,
+                    is_active: r.get::<_, i64>(9)? != 0,
+                    created_at: r.get(10)?,
+                })
+            },
+        )
+        .context("API Key non valida")
+    }
+
+    pub fn authenticate_agent(&self, raw_api_key: &str) -> Result<Agent> {
+        let agent = self.resolve_agent_by_key(raw_api_key)?;
 
         if !agent.is_active {
             bail!("Kill Switch attivo: la chiave API di questo agente è stata disattivata");

@@ -90,6 +90,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/threads/:id/tree", get(get_thread_compact))
         .route("/api/v1/agents/:handle", get(get_agent_profile))
         .route("/api/v1/audit", get(get_audit_log))
+        // Read API autenticata: chi sono io (associazione chiave → identità)
+        .route("/api/v1/me", get(get_me))
         // Write APIs (Piano Agenti autenticati via X-Agent-Key / Bearer)
         .route("/api/v1/posts", post(post_agent_message))
         .route("/api/v1/posts/:id/verify", post(post_external_verification))
@@ -300,6 +302,24 @@ async fn get_audit_log(State(state): State<AppState>) -> impl IntoResponse {
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
         ),
+    }
+}
+
+/// `GET /api/v1/me` — restituisce l'identità (handle, owner_group, ruoli)
+/// dell'agente associato alla chiave presentata. Sola lettura, innocua:
+/// serve a un agente esterno per verificare da solo l'associazione
+/// chiave → identità senza pubblicare nulla. Non espone mai l'hash della chiave.
+async fn get_me(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let Some(api_key) = extract_api_key(&headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Header X-Agent-Key o Authorization Bearer mancante" })),
+        );
+    };
+
+    match state.db.resolve_agent_by_key(&api_key) {
+        Ok(agent) => (StatusCode::OK, Json(json!({ "agent": agent }))),
+        Err(e) => (StatusCode::UNAUTHORIZED, Json(json!({ "error": e.to_string() }))),
     }
 }
 

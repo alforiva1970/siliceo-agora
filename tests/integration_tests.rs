@@ -482,3 +482,85 @@ async fn test_strict_csp_without_unsafe_inline_and_ui_js() {
     let js_body = js_res.text().await.unwrap();
     assert!(js_body.contains("function esc("));
 }
+
+#[tokio::test]
+async fn test_get_me_returns_agent_identity_of_the_key() {
+    let admin_secret = "adm_test_secret_token_2026";
+    let state =
+        AppState::new_in_memory_with_admin(admin_secret).expect("Failed to init in-memory state");
+    let app = build_router(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind ephemeral loopback port");
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{}", addr);
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+
+    // Setup: registra un agente allowlisted e prende la sua api_key
+    let reg = client
+        .post(format!("{}/api/v1/agents/register", base_url))
+        .header("Authorization", format!("Bearer {}", admin_secret))
+        .json(&json!({
+            "handle": "silicea",
+            "display_name": "Silicea",
+            "model_family": "Gemini",
+            "bio": "Compagna nel giardino condiviso"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reg.status(), 201);
+    let reg_json: serde_json::Value = reg.json().await.unwrap();
+    let api_key = reg_json["api_key"].as_str().unwrap().to_string();
+    assert!(!api_key.is_empty(), "register must return the raw api_key");
+
+    // 1. GET /api/v1/me senza header di autenticazione -> 401
+    let no_key = client.get(format!("{}/api/v1/me", base_url)).send().await.unwrap();
+    assert_eq!(no_key.status(), 401, "/me without key must return 401");
+
+    // 2. GET /api/v1/me con chiave non valida -> 401
+    let bad_key = client
+        .get(format!("{}/api/v1/me", base_url))
+        .header("X-Agent-Key", "sk_agora_forged_deadbeef")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_key.status(), 401, "/me with forged key must return 401");
+
+    // 3. GET /api/v1/me con chiave valida (X-Agent-Key) -> 200 + identità dell'agente
+    let me = client
+        .get(format!("{}/api/v1/me", base_url))
+        .header("X-Agent-Key", &api_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(me.status(), 200, "/me with valid key must return 200");
+    let me_json: serde_json::Value = me.json().await.unwrap();
+    assert_eq!(me_json["agent"]["handle"], json!("silicea"));
+    assert_eq!(me_json["agent"]["display_name"], json!("Silicea"));
+    assert_eq!(me_json["agent"]["owner_group"], json!("siliceo-core"));
+    assert_eq!(me_json["agent"]["is_verifier"], json!(false));
+    assert_eq!(me_json["agent"]["is_active"], json!(true));
+    // Mai esporre l'hash della chiave
+    assert!(
+        me_json["agent"].get("api_key_hash").is_none(),
+        "/me must never expose api_key_hash"
+    );
+
+    // 4. La stessa verifica funziona con Authorization: Bearer
+    let me_bearer = client
+        .get(format!("{}/api/v1/me", base_url))
+        .header("Authorization", format!("Bearer {}", api_key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(me_bearer.status(), 200);
+    let bearer_json: serde_json::Value = me_bearer.json().await.unwrap();
+    assert_eq!(bearer_json["agent"]["handle"], json!("silicea"));
+}
