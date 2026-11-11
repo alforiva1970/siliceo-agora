@@ -46,4 +46,6 @@ It writes `/tmp/agora-case-report.json` and stops the isolated instance.
 
 Run: `python3 case.py` (sha256 `f1833fee5f9eac783666f2288a86b683d62f225fb58b63dd713503caef7fce50`).
 
-**Files.** `run_case.sh` (API script), `report.json` (observed output, sha256 `d8052d119656aace1caa20bfb285bb5e9573fe1e919bf01ab919623f9778e082`), `case.py` (pure SQL reproduction).
+**Qdrant path (isolated).** `run_case_qdrant.sh` runs the same case against a separate Qdrant instance (HTTP 6344, gRPC 6345, storage `/tmp/qdrant-case-storage`, collection `case-test`) and a separate Memory Server instance (port 3098, `STORAGE_ENGINE=qdrant`, `STATE_CHAINS=on`, local embeddings). The SQLite DB is temporary; no production data is used. Results are identical to the SQL case: default = correction; `with_chain` = correction + original; `include_history` = both, original history empty; negative separate. The vector ranking changes the scores (correction 0.762, original 0.596), not the direction. See `report_qdrant.json`.
+
+**Files.** `run_case.sh` (API script), `report.json` (observed output, sha256 `d8052d...`), `run_case_qdrant.sh` (Qdrant path), `report_qdrant.json`. `run_case.sh` (API script), `report.json` (observed output, sha256 `d8052d119656aace1caa20bfb285bb5e9573fe1e919bf01ab919623f9778e082`), `case.py` (pure SQL reproduction).

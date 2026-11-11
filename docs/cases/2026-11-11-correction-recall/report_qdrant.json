@@ -1,0 +1,94 @@
+{
+ "environment": {
+  "state_chains": "on",
+  "storage_engine": "qdrant",
+  "qdrant_url": "http://127.0.0.1:6344",
+  "collection": "case-test",
+  "embedding_mode": "local"
+ },
+ "ids": {
+  "original": "1cf653e7-f89d-4922-a9b7-e90532c133dd",
+  "correction": "ef2135a5-36a5-42e9-ae47-82086803c9d4",
+  "negative": "36695423-3da6-4d0b-8848-d3d8b60f6a3a"
+ },
+ "search_default": [
+  {
+   "id": "ef2135a5-36a5-42e9-ae47-82086803c9d4",
+   "content": "La porta del laboratorio era aperta.",
+   "sim": 0.762,
+   "history": []
+  }
+ ],
+ "search_with_chain": [
+  {
+   "id": "ef2135a5-36a5-42e9-ae47-82086803c9d4",
+   "content": "La porta del laboratorio era aperta.",
+   "sim": 0.762,
+   "history": [
+    {
+     "id": "1cf653e7-f89d-4922-a9b7-e90532c133dd",
+     "content": "La porta del laboratorio era chiusa."
+    }
+   ]
+  }
+ ],
+ "search_include_history": [
+  {
+   "id": "ef2135a5-36a5-42e9-ae47-82086803c9d4",
+   "content": "La porta del laboratorio era aperta.",
+   "sim": 0.762,
+   "history": [
+    {
+     "id": "1cf653e7-f89d-4922-a9b7-e90532c133dd",
+     "content": "La porta del laboratorio era chiusa."
+    }
+   ]
+  },
+  {
+   "id": "1cf653e7-f89d-4922-a9b7-e90532c133dd",
+   "content": "La porta del laboratorio era chiusa.",
+   "sim": 0.596,
+   "history": []
+  }
+ ],
+ "search_negative_top1": [
+  {
+   "id": "36695423-3da6-4d0b-8848-d3d8b60f6a3a",
+   "content": "Le maree seguono la luna e il sole.",
+   "sim": 1.0,
+   "history": []
+  }
+ ],
+ "retrieve_default": [
+  {
+   "id": "ef2135a5-36a5-42e9-ae47-82086803c9d4",
+   "content": "La porta del laboratorio era aperta.",
+   "sim": 0.762,
+   "history": [
+    {
+     "id": "1cf653e7-f89d-4922-a9b7-e90532c133dd",
+     "content": "La porta del laboratorio era chiusa."
+    }
+   ]
+  }
+ ],
+ "retrieve_include_history": [
+  {
+   "id": "ef2135a5-36a5-42e9-ae47-82086803c9d4",
+   "content": "La porta del laboratorio era aperta.",
+   "sim": 0.762,
+   "history": [
+    {
+     "id": "1cf653e7-f89d-4922-a9b7-e90532c133dd",
+     "content": "La porta del laboratorio era chiusa."
+    }
+   ]
+  },
+  {
+   "id": "1cf653e7-f89d-4922-a9b7-e90532c133dd",
+   "content": "La porta del laboratorio era chiusa.",
+   "sim": 0.596,
+   "history": []
+  }
+ ]
+}
