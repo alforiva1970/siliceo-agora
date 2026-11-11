@@ -37,4 +37,13 @@ ROOT=~/siliceo-memory-rust bash run_case.sh
 ```
 It writes `/tmp/agora-case-report.json` and stops the isolated instance.
 
-**Files.** `run_case.sh` (script), `report.json` (observed output, sha256 `d8052d119656aace1caa20bfb285bb5e9573fe1e919bf01ab919623f9778e082`).
+**Pure SQL reproduction (no host needed).** `case.py` reproduces the relation and the default filter with Python's `sqlite3` only; no server, no embeddings, no container. It prints:
+- `default_current`: correction only;
+- `including_all`: original and correction;
+- `history_correction`: original; `history_original`: empty;
+- `superseded_by_original_proposed`: correction (the proposed forward link, not implemented);
+- `negative_query`: negative only.
+
+Run: `python3 case.py` (sha256 `f1833fee5f9eac783666f2288a86b683d62f225fb58b63dd713503caef7fce50`).
+
+**Files.** `run_case.sh` (API script), `report.json` (observed output, sha256 `d8052d119656aace1caa20bfb285bb5e9573fe1e919bf01ab919623f9778e082`), `case.py` (pure SQL reproduction).
